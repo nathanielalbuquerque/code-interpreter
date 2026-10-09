@@ -1,3 +1,4 @@
+import json
 import os
 import sys
 import traceback
@@ -12,14 +13,19 @@ from pydantic import BaseModel
 
 app = FastAPI()
 
+
+# CORS - required by the assignment grader
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
+
+# -----------------------------
+# Request / response models
+# -----------------------------
 
 class CodeRequest(BaseModel):
     code: str
@@ -29,100 +35,150 @@ class ErrorAnalysis(BaseModel):
     error_lines: List[int]
 
 
+# -----------------------------
+# Python execution tool
+# -----------------------------
+
 def execute_python_code(code: str) -> dict:
+    """
+    Execute Python code and return the exact stdout or traceback.
+    """
+
     old_stdout = sys.stdout
     stdout = StringIO()
+
     sys.stdout = stdout
 
     try:
         exec(code)
+
+        output = stdout.getvalue()
+
         return {
             "success": True,
-            "output": stdout.getvalue()
+            "output": output
         }
 
     except Exception:
+        output = traceback.format_exc()
+
         return {
             "success": False,
-            "output": traceback.format_exc()
+            "output": output
         }
 
     finally:
         sys.stdout = old_stdout
 
 
-def analyze_error_with_ai(code: str, error_traceback: str) -> List[int]:
+# -----------------------------
+# AI error analysis
+# -----------------------------
+
+def analyze_error_with_ai(
+    code: str,
+    error_traceback: str
+) -> List[int]:
+
+    token = os.environ.get("AIPIPE_TOKEN")
+
+    if not token:
+        raise RuntimeError("AIPIPE_TOKEN environment variable is not set")
+
     client = OpenAI(
-        api_key=os.environ["AIPIPE_TOKEN"],
+        api_key=token,
         base_url="https://aipipe.org/openai/v1"
     )
 
     prompt = f"""
-Analyze this Python code and its traceback.
+Analyze the following Python code and traceback.
 
-Identify the exact source-code line number(s) where the error occurred.
+Identify the exact source-code line number or line numbers
+where the error occurred.
+
+Return ONLY valid JSON in exactly this format:
+
+{{"error_lines":[3]}}
+
+Do not include markdown.
+Do not include explanations.
 
 CODE:
 {code}
 
 TRACEBACK:
 {error_traceback}
-
-Return the line number(s) where the error is located.
 """
 
     response = client.chat.completions.create(
         model="openai/gpt-4.1-nano",
         messages=[
-            {"role": "user", "content": prompt}
-        ],
-        response_format={
-            "type": "json_schema",
-            "json_schema": {
-                "name": "error_analysis",
-                "schema": {
-                    "type": "object",
-                    "properties": {
-                        "error_lines": {
-                            "type": "array",
-                            "items": {"type": "integer"}
-                        }
-                    },
-                    "required": ["error_lines"],
-                    "additionalProperties": False
-                }
+            {
+                "role": "user",
+                "content": prompt
             }
-        }
+        ],
+        temperature=0
     )
 
-    result = ErrorAnalysis.model_validate_json(
-        response.choices[0].message.content
-    )
+    content = response.choices[0].message.content
+
+    if not content:
+        raise RuntimeError("AI returned an empty response")
+
+    # Remove accidental markdown fences if the model adds them.
+    content = content.strip()
+
+    if content.startswith("```"):
+        content = content.replace("```json", "", 1)
+        content = content.replace("```", "")
+        content = content.strip()
+
+    # Parse JSON first
+    parsed = json.loads(content)
+
+    # Validate using Pydantic
+    result = ErrorAnalysis.model_validate(parsed)
 
     return result.error_lines
 
 
+# -----------------------------
+# Root / health endpoint
+# -----------------------------
+
+@app.api_route("/", methods=["GET", "HEAD"])
+def root():
+    return {"status": "ok"}
+
+
+# -----------------------------
+# Main assignment endpoint
+# -----------------------------
+
 @app.post("/code-interpreter")
 def code_interpreter(request: CodeRequest):
+
+    # Step 1: Execute the submitted Python code
     execution = execute_python_code(request.code)
 
+    # Step 2: Successful execution
+    # IMPORTANT: AI is NOT called here.
     if execution["success"]:
         return {
             "error": [],
             "result": execution["output"]
         }
 
+    # Step 3: Error occurred.
+    # Only now call the AI.
     error_lines = analyze_error_with_ai(
         request.code,
         execution["output"]
     )
 
+    # Step 4: Return exact traceback unchanged
     return {
         "error": error_lines,
         "result": execution["output"]
     }
-
-
-@app.get("/")
-def root():
-    return {"status": "ok"}
