@@ -74,7 +74,6 @@ def execute_python_code(code: str) -> dict:
 # -----------------------------
 # AI error analysis
 # -----------------------------
-
 def analyze_error_with_ai(
     code: str,
     error_traceback: str
@@ -87,7 +86,7 @@ def analyze_error_with_ai(
 
     client = OpenAI(
         api_key=token,
-        base_url="https://aipipe.org/openai/v1"
+        base_url="https://aipipe.org/openrouter/v1"
     )
 
     prompt = f"""
@@ -111,7 +110,7 @@ TRACEBACK:
 """
 
     response = client.chat.completions.create(
-        model="openai/gpt-4.1-nano",
+        model="google/gemini-2.0-flash-lite-001",
         messages=[
             {
                 "role": "user",
@@ -126,7 +125,6 @@ TRACEBACK:
     if not content:
         raise RuntimeError("AI returned an empty response")
 
-    # Remove accidental markdown fences if the model adds them.
     content = content.strip()
 
     if content.startswith("```"):
@@ -134,14 +132,11 @@ TRACEBACK:
         content = content.replace("```", "")
         content = content.strip()
 
-    # Parse JSON first
     parsed = json.loads(content)
 
-    # Validate using Pydantic
     result = ErrorAnalysis.model_validate(parsed)
 
     return result.error_lines
-
 
 # -----------------------------
 # Root / health endpoint
